@@ -1,0 +1,192 @@
+-- FIRST WE TAKE CARE OF DUPLICATES
+-- BUT BEFORE THAT
+
+CREATE TABLE new_layoffs (
+    company TEXT,
+    location TEXT,
+    industry TEXT,
+    total_laid_off INTEGER,
+    percentage_laid_off REAL,
+    date TEXT,
+    stage TEXT,
+    country TEXT,
+    funds_raised_millions REAL
+);
+
+INSERT INTO new_layoffs (company, location, industry, total_laid_off, percentage_laid_off, date, stage, country, funds_raised_millions)
+SELECT company, location, industry, total_laid_off, percentage_laid_off, date, stage, country, funds_raised_millions
+FROM layoffs;
+
+ALTER TABLE new_layoffs RENAME TO layoffs_staging;
+
+-- find duplicates
+SELECT 
+    company, 
+    industry, 
+    total_laid_off, 
+    percentage_laid_off,
+    date,
+    stage,
+    country,
+    funds_raised_millions,
+    COUNT(*) AS cnt
+FROM 
+    layoffs_staging
+GROUP BY 
+    company,
+    location,
+    industry, 
+    total_laid_off, 
+    date,
+    stage,
+    country,
+    funds_raised_millions
+HAVING 
+    COUNT(*) > 1;
+
+-- deletion
+
+WITH CTE AS (
+    SELECT 
+        rowid,
+        ROW_NUMBER() OVER (
+            PARTITION BY company, industry, total_laid_off, date
+            ORDER BY rowid  -- Assuming 'rowid' is a unique column in your table
+        ) AS row_num
+    FROM 
+        layoffs_staging
+)
+DELETE FROM layoffs_staging
+WHERE rowid IN (
+    SELECT rowid
+    FROM CTE
+    WHERE row_num > 1
+);
+
+-- verifying deletion
+
+SELECT 
+    company, 
+    industry, 
+    total_laid_off, 
+    date, 
+    COUNT(*) AS cnt
+FROM 
+    layoffs_staging
+GROUP BY 
+    company, 
+    industry, 
+    total_laid_off, 
+    date
+HAVING 
+    COUNT(*) > 1;
+
+-- NOW WE STANDARDIZE
+UPDATE layoffs_staging
+SET company = TRIM(company);
+
+UPDATE layoffs_staging 
+SET location = REPLACE(location, 'Malmö', 'Malmo') 
+WHERE location LIKE '%Malmö%';  
+
+-- changing the date format (if needed)
+
+-- LOOK FOR NULL VALUES AND FIX IF REQUIRED
+
+SELECT * 
+FROM layoffs_staging
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+DELETE 
+FROM layoffs_staging
+WHERE total_laid_off IS NULL
+AND percentage_laid_off IS NULL;
+
+-- EXPLORATORY DATA ANALYSIS
+
+-- 100% laid off companies grouped by biggest fundings
+SELECT * 
+FROM layoffs_staging
+WHERE percentage_laid_off = 1
+ORDER BY funds_raised_millions DESC;
+
+-- companies with biggest single layoff in a single day
+SELECT company, total_laid_off
+FROM layoffs_staging
+ORDER BY total_laid_off DESC
+LIMIT 5;
+
+-- Companies with the most Total Layoffs
+SELECT company, SUM(total_laid_off) AS total_laid_off
+FROM layoffs_staging
+GROUP BY company
+ORDER BY total_laid_off DESC
+LIMIT 10;
+
+-- by location
+SELECT location, SUM(total_laid_off) AS total_laid_off
+FROM layoffs_staging
+GROUP BY location
+ORDER BY total_laid_off DESC
+LIMIT 10;
+
+-- total in past 
+SELECT country, SUM(total_laid_off) AS total_laid_off
+FROM layoffs_staging
+GROUP BY country
+ORDER BY total_laid_off DESC;
+
+-- by year 
+SELECT strftime('%Y', date) AS year, SUM(total_laid_off) AS total_laid_off
+FROM layoffs_staging
+GROUP BY strftime('%Y', date)
+ORDER BY strftime('%Y', date) ASC;
+
+-- total by industry
+SELECT industry, SUM(total_laid_off) AS total_laid_off
+FROM layoffs_staging
+GROUP BY industry
+ORDER BY total_laid_off DESC;
+
+-- total by stage
+SELECT stage, SUM(total_laid_off) AS total_laid_off
+FROM layoffs_staging
+GROUP BY stage
+ORDER BY total_laid_off DESC;
+
+-- companies with most layoffs per year
+WITH Company_Year AS 
+(
+  SELECT company, strftime('%Y', date) AS years, SUM(total_laid_off) AS total_laid_off
+  FROM layoffs_staging
+  GROUP BY company, strftime('%Y', date)
+)
+, Company_Year_Rank AS (
+  SELECT CY.company, CY.years, CY.total_laid_off, 
+         (SELECT COUNT(DISTINCT total_laid_off) + 1 
+          FROM Company_Year CY2 
+          WHERE CY2.years = CY.years AND CY2.total_laid_off > CY.total_laid_off) AS ranking
+  FROM Company_Year CY
+)
+SELECT company, years, total_laid_off, ranking
+FROM Company_Year_Rank
+WHERE ranking <= 3
+AND years IS NOT NULL
+ORDER BY years ASC, total_laid_off DESC;
+
+-- total layoffs per month
+WITH DATE_CTE AS 
+(
+    SELECT SUBSTR(date, 1, 7) AS dates, SUM(total_laid_off) AS total_laid_off
+    FROM layoffs_staging
+    GROUP BY dates
+    ORDER BY dates ASC
+)
+SELECT 
+    dc.dates, 
+    (SELECT SUM(total_laid_off) 
+     FROM DATE_CTE dc2 
+     WHERE dc2.dates <= dc.dates) AS rolling_total_layoffs
+FROM DATE_CTE dc
+ORDER BY dc.dates ASC;
